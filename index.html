@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ARM Memory Barrier Quiz</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 800px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.5;
+    }
+    
+    .question {
+      margin: 2rem 0;
+      padding: 1rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    
+    .question-info {
+      margin: 1rem 0;
+      padding: 1rem;
+      background: #f0f7ff;
+      border-radius: 4px;
+      font-size: 0.95em;
+    }
+    
+    .code-container {
+      background: #f5f5f5;
+      padding: 1rem;
+      border-radius: 4px;
+      font-family: monospace;
+      white-space: pre;
+      margin: 1rem 0;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    .code-line {
+      display: flex;
+      align-items: center;
+      min-height: 1.5em;
+      padding: 0.25rem 0;
+    }
+    
+    .barrier-input {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0.25rem 0;
+      margin-left: 2rem;
+    }
+    
+    .barrier-input select {
+      padding: 0.25rem;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      background: white;
+    }
+    
+    .feedback {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 4px;
+    }
+    
+    .feedback.correct {
+      background: #e6ffe6;
+      color: #006600;
+    }
+    
+    .feedback.incorrect {
+      background: #ffe6e6;
+      color: #660000;
+    }
+    
+    button {
+      padding: 0.5rem 1rem;
+      background: #0066cc;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    
+    button:hover {
+      background: #0052a3;
+    }
+
+    .code-line-content {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <h1>ARM Memory Barrier Quiz</h1>
+  <p>For each code snippet, select the required memory barriers between the lines of code. Select "None" if no barrier is needed.</p>
+  
+  <div id="questions"></div>
+  
+  <script>
+    const barrierTypes = ["None", "DMB", "DSB", "ISB"];
+    const barrierDomains = ["None", "SY", "ISH", "NSH", "OSH", "ISHST", "OSHST", "NSHST", "ISHLD", "OSHLD", "NSHLD"];
+
+    const questions = [
+      {
+        title: "DMA Setup",
+        info: `<p>This scenario involves setting up a DMA transfer. The CPU needs to write to device registers to configure the transfer, then trigger it.</p>
+        <p>Consider:</p>
+        <ul>
+          <li>The DMA controller could be anywhere in the system</li>
+          <li>Register writes must be observed in the correct order</li>
+          <li>The trigger must not happen before setup is complete</li>
+        </ul>`,
+        code: [
+          "writel(buffer, dev->dma_addr_reg);",
+          "writel(size, dev->dma_size_reg);",
+          `<div>// Signal device to start DMA<br>writel(DMA_START_CMD, dev->cmd_reg);</div>`
+        ],
+        barriers: [
+          "",
+          "DSB SY",
+          "",
+          ""
+        ],
+        explanation: `A DSB SY is needed before the command register write to ensure the setup is complete and visible system-wide before starting the DMA.`
+      },
+      {
+        title: "CPU Mailbox Send",
+        info: `<p>This is a CPU-to-CPU communication scenario using a mailbox. One CPU writes data and then signals another CPU.</p>
+        <p>Consider:</p>
+        <ul>
+          <li>Only store ordering is required</li>
+          <li>Communication is only between CPUs in the same inner shareable domain</li>
+          <li>The order of data vs trigger visibility is critical</li>
+        </ul>`,
+        code: [
+          `<div>// Write message to mailbox<br>writel(msg, mb->data_reg);</div>`,
+          `<div>// Trigger receiving CPU<br>writel(1, mb->trigger_reg);</div>`
+        ],
+        barriers: [
+          "DMB ISHST",
+          "",
+          ""
+        ],
+        explanation: `A DMB ISHST ensures the message data is visible before the trigger, and ISH is sufficient for CPU-to-CPU communication. ST variant is enough as we only need to order stores.`
+      },
+      {
+        title: "Device Shutdown",
+        info: `<p>This code implements a device shutdown sequence. It needs to coordinate across multiple CPUs and ensure all device accesses are complete.</p>
+        <p>Consider:</p>
+        <ul>
+          <li>Other CPUs need to see the shutdown signal</li>
+          <li>All outstanding device accesses must be complete before final disable</li>
+          <li>Accesses are from multiple CPUs in the inner shareable domain</li>
+        </ul>`,
+        code: [
+          "atomic_set(&dev->shutting_down, 1);",
+          `<div>// Wait for transactions<br>while (atomic_read(&dev->transaction_count) > 0)<br>&nbsp;&nbsp;&nbsp;&nbsp;cpu_relax();</div>`,
+          `<div>// Disable device<br>writel(0, dev->enable_reg);</div>`
+        ],
+        barriers: [
+          "DSB ISH",
+          "DSB ISH",
+          "",
+          ""
+        ],
+        explanation: `First DSB ISH ensures shutdown signal is visible, second DSB ISH ensures all device writes from other CPUs are visible before disable.`
+      },
+      {
+        title: "Page Table Modification",
+        info: `<p>This code modifies a page table entry to change memory permissions from read-only to read-write. The modification needs to be visible to subsequent memory accesses.</p>
+        <p>Consider:</p>
+        <ul>
+          <li>Page table walks use the memory system</li>
+          <li>TLB and other caching structures need to be invalidated</li>
+          <li>The CPU's fetch and prediction pipeline needs to be synchronized</li>
+          <li>Subsequent code needs to see the new permissions</li>
+        </ul>`,
+        code: [
+          "pte = pte_set_flags(pte, _PAGE_RW);",
+          "set_pte_at(mm, addr, ptep, pte);",
+          `<div>// Ensure permission change is visible<br>flush_tlb_page(mm, addr);</div>`,
+          `<div>// Continue with code that needs RW access<br>writel(value, addr);</div>`
+        ],
+        barriers: [
+          "",
+          "DSB ISH",
+          "ISB SY",
+          "",
+          ""
+        ],
+        explanation: `DSB ISH ensures the page table update and TLB flush are complete and visible to all CPUs in the inner shareable domain. ISB is then required to ensure the pipeline fetches new translations for subsequent instructions. SY domain is the only valid option for ISB. It only affects the local CPU.`
+      }
+    ];
+
+    function createBarrierInputs(questionIndex, position) {
+      return `
+        <div class="barrier-input">
+          <select data-question="${questionIndex}" data-position="${position}" data-part="type">
+            ${barrierTypes.map(type => `<option value="${type}">${type}</option>`).join('')}
+          </select>
+          <select data-question="${questionIndex}" data-position="${position}" data-part="domain">
+            ${barrierDomains.map(domain => `<option value="${domain}">${domain}</option>`).join('')}
+          </select>
+        </div>
+      `;
+    }
+
+    function createQuestion(question, index) {
+      const div = document.createElement('div');
+      div.className = 'question';
+      
+      div.innerHTML = `
+        <h3>${question.title}</h3>
+        <div class="question-info">${question.info}</div>
+        <div class="code-container">
+          ${question.code.map((line, i) => `
+            <div class="code-line">
+              <span class="code-line-content">${line}</span>
+            </div>
+            ${createBarrierInputs(index, i)}
+          `).join('')}
+        </div>
+        <button onclick="checkAnswer(${index})">Check Answer</button>
+        <div class="feedback" id="feedback-${index}"></div>
+      `;
+      
+      return div;
+    }
+
+    function getSelectedBarrier(questionIndex, position) {
+      const typeSelect = document.querySelector(`select[data-question="${questionIndex}"][data-position="${position}"][data-part="type"]`);
+      const domainSelect = document.querySelector(`select[data-question="${questionIndex}"][data-position="${position}"][data-part="domain"]`);
+      
+      // If we can't find the selects, this position doesn't exist in the DOM
+      if (!typeSelect || !domainSelect) {
+        return "";
+      }
+      
+      const type = typeSelect.value;
+      const domain = domainSelect.value;
+      
+      if (type === "None" || domain === "None") return "";
+      return `${type} ${domain}`.trim();
+    }
+
+    function checkAnswer(questionIndex) {
+      const question = questions[questionIndex];
+      const feedback = document.getElementById(`feedback-${questionIndex}`);
+      
+      const numPositions = document.querySelectorAll(`select[data-question="${questionIndex}"][data-part="type"]`).length;
+      
+      let correct = true;
+      let message = '<p>';
+      
+      for (let i = 0; i < numPositions; i++) {
+        const expected = i < question.barriers.length ? question.barriers[i] : "";
+        const actual = getSelectedBarrier(questionIndex, i);
+        
+        if (expected.toLowerCase() !== actual.toLowerCase()) {
+          correct = false;
+          if (expected === '') {
+            message += `No barrier needed at position ${i + 1}, but got "${actual}"<br>`;
+          } else if (actual === '') {
+            message += `Expected "${expected}" at position ${i + 1}, but got no barrier<br>`;
+          } else {
+            message += `Expected "${expected}" at position ${i + 1}, but got "${actual}"<br>`;
+          }
+        }
+      }
+      message += '</p>';
+      
+      feedback.className = `feedback ${correct ? 'correct' : 'incorrect'}`;
+      feedback.innerHTML = correct ? 
+        `<p>✅ Correct!</p><p>${question.explanation}</p>` :
+        `<p>❌ Not quite right.</p>${message}<p>${question.explanation}</p>`;
+    }
+
+    // Initialize quiz
+    const questionsContainer = document.getElementById('questions');
+    questions.forEach((question, index) => {
+      questionsContainer.appendChild(createQuestion(question, index));
+    });
+  </script>
+</body>
+</html>
